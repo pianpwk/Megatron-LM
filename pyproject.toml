@@ -63,6 +63,10 @@ Download = "https://github.com/NVIDIA/Megatron-LM/releases"
 Homepage = "https://github.com/NVIDIA/Megatron-LM"
 
 [project.optional-dependencies]
+spmd = [
+    "spmd_types==0.2.5",
+]
+
 training = [
     "flask-restful",
     "sentencepiece",
@@ -144,6 +148,7 @@ test = [
     "tensorboard",
     "pyyaml",
     "nemo-run",
+    "spmd_types==0.2.5",
 ]
 docs = [
     "sphinx",

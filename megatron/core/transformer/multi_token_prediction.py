@@ -6,6 +6,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, List, Optional, Union
 
+import spmd_types as spmd
 import torch
 from torch import Tensor
 
@@ -581,6 +582,15 @@ class MTPLossAutoScaler(torch.autograd.Function):
         """
         ctx.save_for_backward(mtp_loss)
         return output
+
+    @staticmethod
+    def spmd_typecheck(result, *, output):
+        """The forward is the identity on ``output``.
+
+        ``mtp_loss`` only contributes a gradient in backward, so it must not
+        influence the result's type; the generic local rule would let it.
+        """
+        spmd.assert_type_like(result, output)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):

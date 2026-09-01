@@ -11,6 +11,7 @@ from itertools import chain
 from math import ceil
 from typing import Optional, Protocol, Tuple
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 
@@ -979,7 +980,11 @@ class TEGroupedMLP(MegatronModule):
         # Note: The fused impl is stored in a tuple to avoid
         # registering submodules.
         if self._fused_ops is None:
-            self._fused_ops = (self._make_fused_ops(),)
+            # Building the fused module is setup, not computation: it allocates
+            # placeholder weights that are immediately replaced by this module's own
+            # parameters, so it is excluded from SPMD type checking.
+            with spmd.no_typecheck():
+                self._fused_ops = (self._make_fused_ops(),)
         (ops,) = self._fused_ops
 
         # Apply padding if needed

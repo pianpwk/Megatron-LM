@@ -4,6 +4,7 @@ import logging
 from contextlib import contextmanager
 from typing import Optional
 
+import spmd_types as spmd
 import torch
 
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
@@ -357,6 +358,35 @@ class DistributedDataParallel(_BaseDataParallel):
             self.enable_forward_pre_hook()
         self.overlap_param_gather_with_optimizer_step = False
 
+    def forward(self, *inputs, **kwargs):
+        """Calls the wrapped module's forward() method."""
+        if spmd.is_type_checking():
+            self._assert_parameters_replicated()
+        return super().forward(*inputs, **kwargs)
+
+    def _assert_parameters_replicated(self):
+        """Promise, on the type-checking mesh, that this wrapper reduces the gradients.
+
+        A parameter whose gradient is summed here is replicated (R) along the
+        axes of the reduction group: identical value on every rank, partial
+        gradient. The model only knows how its parameters are sharded and leaves
+        these axes to whichever wrapper performs the reduction.
+
+        The dense reduction group folds data and context parallelism together,
+        while the type-checking mesh may keep them as separate axes, so the
+        promise is made on each mesh axis the group contains. Expert parameters
+        are typed on the expert mesh, where their reduction group is an axis.
+        """
+        mesh = spmd.current_mesh()
+        dense_reduction_axis = spmd.MeshAxis.of(self.dp_cp_group)
+        for param in self.params_with_grad:
+            if getattr(param, 'allreduce', True):
+                for axis in mesh:
+                    if axis <= dense_reduction_axis:
+                        spmd.assert_type(param, {axis: spmd.R})
+            else:
+                spmd.assert_type(param, {self.expt_dp_group: spmd.R})
+
     def enable_forward_pre_hook(self):
         """
         Enable forward pre-hooks needed for param all-gather overlap with forward compute.
@@ -433,12 +463,16 @@ class DistributedDataParallel(_BaseDataParallel):
             if is_graph_capturing():
                 return
 
-            if param in self.param_to_bucket_group:
-                assert param.requires_grad
-                if self.ddp_config.overlap_grad_reduce:
-                    assert (
-                        param.grad is not None
-                    ), 'param.grad being None is not safe when overlap_grad_reduce is True'
+            if param not in self.param_to_bucket_group:
+                return
+            assert param.requires_grad
+            if self.ddp_config.overlap_grad_reduce:
+                assert (
+                    param.grad is not None
+                ), 'param.grad being None is not safe when overlap_grad_reduce is True'
+            # Gradient accumulation and reduction are this wrapper's own bookkeeping,
+            # not model computation, so they are not type-checked.
+            with spmd.no_typecheck():
                 if param.grad is not None and (
                     not param.grad_added_to_main_grad or getattr(param, 'zero_out_wgrad', False)
                 ):
@@ -532,8 +566,9 @@ class DistributedDataParallel(_BaseDataParallel):
         calls. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
-            bucket_group.start_grad_sync()
+        with spmd.no_typecheck():
+            for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
+                bucket_group.start_grad_sync()
 
     def finish_grad_sync(self, force_all_reduce: Optional[bool] = False):
         """
@@ -544,8 +579,9 @@ class DistributedDataParallel(_BaseDataParallel):
         calls to complete. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
-            bucket_group.finish_grad_sync(force_all_reduce=force_all_reduce)
+        with spmd.no_typecheck():
+            for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
+                bucket_group.finish_grad_sync(force_all_reduce=force_all_reduce)
 
     def free_overlap_buffers(self):
         """Free overlap param-gather GPU buffers across all bucket groups."""

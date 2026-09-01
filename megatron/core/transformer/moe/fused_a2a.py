@@ -15,6 +15,7 @@ try:
 except ImportError:
     HAVE_DEEP_EP = False
 
+import spmd_types as spmd
 import torch
 
 _buffer = None
@@ -350,6 +351,38 @@ def reset_hybrid_ep_buffer():
     _hybrid_ep_buffer = None
 
 
+def _is_fake_process_group(group: torch.distributed.ProcessGroup) -> bool:
+    """Whether ``group`` uses PyTorch's fake backend, which performs no communication."""
+    return torch.distributed.get_backend(group) == "fake"
+
+
+def _fake_dispatch(x, routing_map, probs, num_local_experts, num_permuted_tokens):
+    """Shape-faithful stand-in for the HybridEP dispatch kernel on a fake process group.
+
+    Rows of ``x`` are recycled to fill the permuted-token budget and token counts
+    are spread evenly over the local experts. The returned handle carries what
+    ``_fake_combine`` and the backward pass need, plus the overflow flag that the
+    dispatcher reads from the real handle.
+    """
+    num_tokens = x.shape[0]
+    rows = num_permuted_tokens if num_permuted_tokens is not None else int(routing_map.sum().item())
+    indices = torch.arange(rows, device=x.device).remainder(num_tokens)
+    dispatched_hidden = x.index_select(0, indices)
+    dispatched_probs = probs.new_zeros(rows)
+    tokens_per_expert = torch.full(
+        (num_local_experts,), rows // num_local_experts, dtype=torch.long, device=x.device
+    )
+    overflow_flag = torch.zeros((), dtype=torch.int32, device=x.device)
+    handle = (indices, num_tokens, overflow_flag)
+    return dispatched_hidden, dispatched_probs, tokens_per_expert, handle
+
+
+def _fake_combine(x, handle):
+    """Inverse of ``_fake_dispatch``: sum each token's rows back into its original slot."""
+    indices, num_tokens, _ = handle
+    return x.new_zeros(num_tokens, *x.shape[1:]).index_add_(0, indices, x)
+
+
 class HybridEPDispatch(torch.autograd.Function):
     '''
     Fused dispatch operation for permute + dispatch a2a + permute using the HybridEP backend
@@ -375,6 +408,18 @@ class HybridEPDispatch(torch.autograd.Function):
         '''
         Forward pass of fused dispatch of the HybridEP backend
         '''
+        ctx.fake = _is_fake_process_group(group)
+        if ctx.fake:
+            # The kernel needs real inter-rank transport. The stand-in carries no
+            # types of its own; ``spmd_typecheck`` states the contract for both.
+            with spmd.no_typecheck():
+                dispatched_hidden, dispatched_probs, tokens_per_expert, handle = _fake_dispatch(
+                    x, routing_map, probs, num_local_experts, num_permuted_tokens
+                )
+            ctx.handle = handle
+            ctx.probs_shape = probs.shape
+            return dispatched_hidden, dispatched_probs, None, tokens_per_expert, handle
+
         if fused or num_blocks_permute is not None or num_blocks_unpermute is not None:
             import inspect
             import warnings
@@ -441,11 +486,30 @@ class HybridEPDispatch(torch.autograd.Function):
         )
 
     @staticmethod
+    def spmd_typecheck(outputs, *, x, group):
+        """Tokens are exchanged across ``group``, so every result varies along it.
+
+        The group folds expert and expert-tensor parallelism, which the
+        type-checking mesh may keep as separate axes, so the claim is made on each
+        mesh axis the group contains. Other axes keep the input's type.
+        """
+        dispatched_hidden, dispatched_probs, _, tokens_per_expert, handle = outputs
+        group_axis = spmd.MeshAxis.of(group)
+        varying = {axis: spmd.V for axis in spmd.current_mesh() if axis <= group_axis}
+        # The handle's last entry is this rank's overflow flag, which the dispatcher reads.
+        for tensor in (dispatched_hidden, dispatched_probs, tokens_per_expert, handle[-1]):
+            spmd.assert_local_type_like(tensor, x, varying)
+
+    @staticmethod
     def backward(ctx, grad_x, grad_probs, grad_scaling_factor, grad_tokens_per_expert, grad_handle):
         '''
         Backward pass of fused dispatch of the HybridEP backend
         '''
         handle = ctx.handle
+        if ctx.fake:
+            combined_hidden = _fake_combine(grad_x, handle)
+            combined_probs = grad_x.new_zeros(ctx.probs_shape)
+            return (combined_hidden, None, combined_probs) + (None,) * 10
         combined_hidden, combined_probs = _hybrid_ep_buffer.combine_with_unpermute(
             hidden=grad_x,
             probs=grad_probs,
@@ -481,6 +545,11 @@ class HybridEPCombine(torch.autograd.Function):
         '''
         Forward pass of fused combine of the HybridEP backend
         '''
+        ctx.fake = isinstance(handle, tuple) and len(handle) == 3 and isinstance(handle[1], int)
+        if ctx.fake:
+            ctx.handle = handle
+            with spmd.no_typecheck():
+                return _fake_combine(x, handle)
         combined_hidden, _ = _hybrid_ep_buffer.combine_with_unpermute(
             hidden=x,
             handle=handle,
@@ -494,11 +563,19 @@ class HybridEPCombine(torch.autograd.Function):
         return combined_hidden
 
     @staticmethod
+    def spmd_typecheck(output, *, x):
+        """Tokens return to their owners; the axes they crossed already vary in ``x``."""
+        spmd.assert_local_type_like(output, x)
+
+    @staticmethod
     def backward(ctx, grad_x):
         '''
         Backward pass of fused combine of the HybridEP backend
         '''
         handle = ctx.handle
+        if ctx.fake:
+            indices, _, _ = handle
+            return grad_x.index_select(0, indices), None, None, None, None
         dispatched_hidden, _, _, _, _ = _hybrid_ep_buffer.dispatch_with_permute(
             hidden=grad_x,
             scaling_factor=None,

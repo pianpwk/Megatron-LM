@@ -3,6 +3,7 @@
 from typing import Optional
 from unittest.mock import MagicMock
 
+import spmd_types as spmd
 import torch
 from packaging import version
 
@@ -207,6 +208,7 @@ def rotary_bwd_q_kernel(
     tl.store(DO + x_2_off, x_2, mask=mask)
 
 
+@spmd.register_local_autograd_function
 class ApplyMLARotaryEmbQ(torch.autograd.Function):
     """
     Autograd function for applying YARN RoPE to MLA's query.
@@ -578,6 +580,7 @@ def rotary_bwd_kv_kernel(
         tl.store(dEMB_ptr + tl.arange(0, emb_dim // 2) * 2 + 1, x_2)
 
 
+@spmd.register_local_autograd_function
 class ApplyMLARotaryEmbKV(torch.autograd.Function):
     """
     Autograd function for applying YARN RoPE to MLA's key and value.

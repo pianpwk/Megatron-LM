@@ -9,6 +9,7 @@ import warnings
 from functools import partial
 from typing import Any, Callable, List, Optional, Tuple
 
+import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
@@ -354,6 +355,25 @@ class LinearWithFrozenWeight(torch.autograd.Function):
         return output
 
     @staticmethod
+    def spmd_typecheck(output, *, input, weight, bias, allreduce_dgrad, tp_group):
+        """Check the tensor-parallel contract of the completed frozen linear."""
+        tp_axis = spmd.normalize_axis(tp_group)
+        spmd.assert_type(weight, {tp_axis: spmd.V})
+        if bias is not None:
+            spmd.assert_type(bias, {tp_axis: spmd.V})
+        if allreduce_dgrad:
+            input_type = spmd.I
+        elif spmd.get_axis_local_type(input, tp_axis) is spmd.R:
+            # Sequence parallelism gathers S(0) to R before calling the
+            # frozen linear. Other no-reduction paths consume V/S inputs.
+            input_type = spmd.R
+        else:
+            input_type = spmd.V
+        spmd.assert_type(input, {tp_axis: input_type})
+
+        spmd.assert_local_type_like(output, input, {tp_axis: spmd.V})
+
+    @staticmethod
     @custom_bwd
     def backward(ctx, grad_output):
         """Backward with frozen weight."""
@@ -487,6 +507,25 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         if bias is not None:
             output = output + bias
         return output
+
+    @staticmethod
+    def spmd_typecheck(
+        output, *, input, weight, bias, allreduce_dgrad, sequence_parallel, tp_group
+    ):
+        """Check the tensor-parallel contract of the completed trainable linear."""
+        tp_axis = spmd.normalize_axis(tp_group)
+        spmd.assert_type(weight, {tp_axis: spmd.V})
+        if bias is not None:
+            spmd.assert_type(bias, {tp_axis: spmd.V})
+        if allreduce_dgrad:
+            input_type = spmd.I
+        elif sequence_parallel:
+            input_type = spmd.S(0)
+        else:
+            input_type = spmd.V
+        spmd.assert_type(input, {tp_axis: input_type})
+
+        spmd.assert_local_type_like(output, input, {tp_axis: spmd.V})
 
     @staticmethod
     @custom_bwd

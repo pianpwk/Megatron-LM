@@ -1,5 +1,6 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
+import spmd_types as spmd
 import torch
 
 from megatron.core.parallel_state import get_global_memory_buffer
@@ -209,6 +210,12 @@ class _CopyToModelParallelRegion(torch.autograd.Function):
         return input_
 
     @staticmethod
+    def spmd_typecheck(output, *, input_, group):
+        """Type the identity forward and all-reduce backward."""
+        spmd.assert_type(input_, {group: spmd.I})
+        spmd.assert_local_type_like(output, input_, {group: spmd.R})
+
+    @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
         return _reduce(grad_output, ctx.group), None
@@ -226,6 +233,15 @@ class _ReduceFromModelParallelRegion(torch.autograd.Function):
     def forward(ctx, input_, group):
         """Forward function."""
         return _reduce(input_, group)
+
+    @staticmethod
+    def spmd_typecheck(output, *, input_, group):
+        """Type the all-reduce forward and identity backward."""
+        spmd.assert_type(input_, {group: spmd.V})
+        # I adds a gradient promise on top of R. A result with no gradient, such
+        # as the router's token counts, is typed R so it can mix freely with V.
+        output_type = spmd.I if output.requires_grad else spmd.R
+        spmd.assert_local_type_like(output, input_, {group: output_type})
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -248,6 +264,12 @@ class _ScatterToModelParallelRegion(torch.autograd.Function):
         return _split_along_last_dim(input_, group)
 
     @staticmethod
+    def spmd_typecheck(output, *, input_, group):
+        """Type the last-dimension split and gather backward."""
+        spmd.assert_type(input_, {group: spmd.I})
+        spmd.assert_local_type_like(output, input_, {group: spmd.S(-1)})
+
+    @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
         return _gather_along_last_dim(grad_output, ctx.group), None
@@ -268,6 +290,12 @@ class _GatherFromModelParallelRegion(torch.autograd.Function):
         return _gather_along_last_dim(input_, group)
 
     @staticmethod
+    def spmd_typecheck(output, *, input_, group):
+        """Type the last-dimension gather and split backward."""
+        spmd.assert_type(input_, {group: spmd.S(-1)})
+        spmd.assert_local_type_like(output, input_, {group: spmd.I})
+
+    @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
         return _split_along_last_dim(grad_output, ctx.group), None
@@ -286,6 +314,12 @@ class _ScatterToSequenceParallelRegion(torch.autograd.Function):
         """Forward function."""
         ctx.group = group
         return _split_along_first_dim(input_, group)
+
+    @staticmethod
+    def spmd_typecheck(output, *, input_, group):
+        """Type the sequence split and gather backward."""
+        spmd.assert_type(input_, {group: spmd.I})
+        spmd.assert_local_type_like(output, input_, {group: spmd.S(0)})
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -323,6 +357,13 @@ class _GatherFromSequenceParallelRegion(torch.autograd.Function):
         ctx.output_split_sizes = output_split_sizes
         ctx.use_global_buffer = use_global_buffer
         return _gather_along_first_dim(input_, group, output_split_sizes, use_global_buffer)
+
+    @staticmethod
+    def spmd_typecheck(output, *, input_, group, tensor_parallel_output_grad):
+        """Type the sequence gather and its selectable gradient collective."""
+        spmd.assert_type(input_, {group: spmd.S(0)})
+        output_type = spmd.R if tensor_parallel_output_grad else spmd.I
+        spmd.assert_local_type_like(output, input_, {group: output_type})
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -365,6 +406,12 @@ class _ReduceScatterToSequenceParallelRegion(torch.autograd.Function):
         return _reduce_scatter_along_first_dim(input_, group, input_split_sizes, use_global_buffer)
 
     @staticmethod
+    def spmd_typecheck(output, *, input_, group):
+        """Type the sequence reduce-scatter and gather backward."""
+        spmd.assert_type(input_, {group: spmd.V})
+        spmd.assert_local_type_like(output, input_, {group: spmd.S(0)})
+
+    @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
         input_split_sizes = ctx.input_split_sizes
@@ -392,6 +439,12 @@ class _AllGatherFromTensorParallelRegion(torch.autograd.Function):
         return _gather_along_last_dim(input_, group)
 
     @staticmethod
+    def spmd_typecheck(output, *, input_, group):
+        """Type the last-dimension all-gather and reduce-scatter backward."""
+        spmd.assert_type(input_, {group: spmd.S(-1)})
+        spmd.assert_local_type_like(output, input_, {group: spmd.R})
+
+    @staticmethod
     def backward(ctx, grad_output):
         """Backward function."""
         return _reduce_scatter_along_last_dim(grad_output, ctx.group), None
@@ -410,6 +463,12 @@ class _ReduceScatterToTensorParallelRegion(torch.autograd.Function):
         """Forward function."""
         ctx.group = group
         return _reduce_scatter_along_last_dim(input_, group)
+
+    @staticmethod
+    def spmd_typecheck(output, *, input_, group):
+        """Type the last-dimension reduce-scatter and all-gather backward."""
+        spmd.assert_type(input_, {group: spmd.V})
+        spmd.assert_local_type_like(output, input_, {group: spmd.S(-1)})
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -449,6 +508,12 @@ class _AllToAll(torch.autograd.Function):
             group=group,
         )
         return output
+
+    @staticmethod
+    def spmd_typecheck(output, *, group, input):
+        """Type the self-adjoint token exchange."""
+        spmd.assert_type(input, {group: spmd.S(0)})
+        spmd.assert_local_type_like(output, input, {group: spmd.S(0)})
 
     @staticmethod
     def backward(ctx, *grad_output):

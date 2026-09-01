@@ -9,6 +9,7 @@ import logging
 from collections.abc import Callable
 from typing import Any, Optional, TypeVar, Union
 
+import spmd_types as spmd
 import torch
 from torch import _C
 from torch.cuda import _lazy_call, _lazy_init
@@ -315,8 +316,11 @@ class CudaRNGStatesTracker:
         try:
             yield
         finally:
-            # Throw a warning if cpu RNG state changed
-            if not torch.all(cpu_rng_state == torch.get_rng_state()).item():
+            # Throw a warning if cpu RNG state changed. Comparing host RNG state is
+            # bookkeeping rather than model computation, so it is not type-checked.
+            with spmd.no_typecheck():
+                cpu_rng_state_changed = not torch.all(cpu_rng_state == torch.get_rng_state()).item()
+            if cpu_rng_state_changed:
                 logging.getLogger(__name__).warning('CPU RNG state changed within GPU RNG context')
             # Check if the current state name is the same as the desired state name.
             if self._current_state_name != name:

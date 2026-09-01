@@ -27,6 +27,7 @@ from types import TracebackType
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
 
 import numpy
+import spmd_types as spmd
 import torch
 
 from megatron.core import config
@@ -696,6 +697,7 @@ class WrappedTensor:
         return self._wrapper.pop(0)
 
 
+@spmd.register_local_autograd_function
 class MakeViewlessTensor(torch.autograd.Function):
     """
     Autograd function to make a viewless tensor.
