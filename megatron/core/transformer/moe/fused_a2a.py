@@ -18,6 +18,7 @@ except ImportError:
 import spmd_types as spmd
 import torch
 
+
 _buffer = None
 
 
@@ -411,7 +412,7 @@ class HybridEPDispatch(torch.autograd.Function):
         ctx.fake = _is_fake_process_group(group)
         if ctx.fake:
             # The kernel needs real inter-rank transport. The stand-in carries no
-            # types of its own; ``spmd_typecheck`` states the contract for both.
+            # types of its own; the sidecar rule states the contract for both.
             with spmd.no_typecheck():
                 dispatched_hidden, dispatched_probs, tokens_per_expert, handle = _fake_dispatch(
                     x, routing_map, probs, num_local_experts, num_permuted_tokens
@@ -486,21 +487,6 @@ class HybridEPDispatch(torch.autograd.Function):
         )
 
     @staticmethod
-    def spmd_typecheck(outputs, *, x, group):
-        """Tokens are exchanged across ``group``, so every result varies along it.
-
-        The group folds expert and expert-tensor parallelism, which the
-        type-checking mesh may keep as separate axes, so the claim is made on each
-        mesh axis the group contains. Other axes keep the input's type.
-        """
-        dispatched_hidden, dispatched_probs, _, tokens_per_expert, handle = outputs
-        group_axis = spmd.MeshAxis.of(group)
-        varying = {axis: spmd.V for axis in spmd.current_mesh() if axis <= group_axis}
-        # The handle's last entry is this rank's overflow flag, which the dispatcher reads.
-        for tensor in (dispatched_hidden, dispatched_probs, tokens_per_expert, handle[-1]):
-            spmd.assert_local_type_like(tensor, x, varying)
-
-    @staticmethod
     def backward(ctx, grad_x, grad_probs, grad_scaling_factor, grad_tokens_per_expert, grad_handle):
         '''
         Backward pass of fused dispatch of the HybridEP backend
@@ -561,11 +547,6 @@ class HybridEPCombine(torch.autograd.Function):
         ctx.num_permuted_tokens = num_permuted_tokens
         ctx.fused = fused
         return combined_hidden
-
-    @staticmethod
-    def spmd_typecheck(output, *, x):
-        """Tokens return to their owners; the axes they crossed already vary in ``x``."""
-        spmd.assert_local_type_like(output, x)
 
     @staticmethod
     def backward(ctx, grad_x):

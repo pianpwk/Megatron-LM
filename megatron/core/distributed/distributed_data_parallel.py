@@ -377,15 +377,9 @@ class DistributedDataParallel(_BaseDataParallel):
         promise is made on each mesh axis the group contains. Expert parameters
         are typed on the expert mesh, where their reduction group is an axis.
         """
-        mesh = spmd.current_mesh()
-        dense_reduction_axis = spmd.MeshAxis.of(self.dp_cp_group)
-        for param in self.params_with_grad:
-            if getattr(param, 'allreduce', True):
-                for axis in mesh:
-                    if axis <= dense_reduction_axis:
-                        spmd.assert_type(param, {axis: spmd.R})
-            else:
-                spmd.assert_type(param, {self.expt_dp_group: spmd.R})
+        from megatron.core.spmd.checker import assert_ddp_parameters_replicated
+
+        assert_ddp_parameters_replicated(self)
 
     def enable_forward_pre_hook(self):
         """

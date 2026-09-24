@@ -3,7 +3,6 @@
 
 # pylint: disable=missing-function-docstring, missing-class-docstring
 
-import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 
@@ -145,7 +144,6 @@ class BiasSwiGLUFunction(torch.autograd.Function):
         return tmp, tmp, None, None
 
 
-@spmd.register_local_autograd_function
 class SwiGLUFunction(torch.autograd.Function):
     """Custom autograd function for SwiGLU activation without bias."""
 

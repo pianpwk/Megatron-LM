@@ -10,7 +10,6 @@ import warnings
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple, cast
 
-import spmd_types as spmd
 import torch
 import torch.nn.functional as F
 from packaging.version import Version as PkgVersion
@@ -399,8 +398,6 @@ def split_te_layernorm_column_parallel_linear(
 if HAVE_TE and is_te_min_version("1.13.0"):
     from transformer_engine.pytorch.ops.fuser import _OperationFuserAutogradFunction
 
-    spmd.register_local_autograd_function(_OperationFuserAutogradFunction)
-
     class TEActivationOp:
         """
         A conditional wrapper to initialize an instance of Transformer-Engine's activation
@@ -673,51 +670,6 @@ if HAVE_TE:
 
     _Linear = _te_linear._Linear
 
-    def _named_non_tensor_args(unpacker, values):
-        """Name a tuple immediately unpacked into a function's first locals."""
-        first_local = len(inspect.signature(unpacker).parameters)
-        names = unpacker.__code__.co_varnames[first_local : first_local + len(values)]
-        if len(names) != len(values):
-            raise NotImplementedError(
-                f"Could not identify all non-tensor arguments for {unpacker.__qualname__}"
-            )
-        return dict(zip(names, values))
-
-    def _assert_te_linear_types(out, inp, options):
-        """The tensor-parallel contract shared by Transformer Engine's linear functions.
-
-        ``options`` is the named ``non_tensor_args`` tuple. Megatron hands TE its
-        process group and parallel mode explicitly, so the contract is stated
-        against that group just as the native mappings do.
-        """
-        tp_group = options["tp_group"]
-        parallel_mode = options["parallel_mode"]
-        if parallel_mode is None:
-            # Megatron passes ``parallel_mode=None`` when it performs the tensor-parallel
-            # communication itself (expert linears and "duplicated" mode), so TE does none.
-            spmd.assert_local_type_like(out, inp)
-        elif parallel_mode == "column":
-            input_type = spmd.S(0) if options["sequence_parallel"] else spmd.I
-            spmd.assert_type(inp, {tp_group: input_type})
-            spmd.assert_local_type_like(out, inp, {tp_group: spmd.S(-1)})
-        elif parallel_mode == "row":
-            output_type = spmd.S(0) if options["sequence_parallel"] else spmd.I
-            spmd.assert_type(inp, {tp_group: spmd.S(-1)})
-            spmd.assert_local_type_like(out, inp, {tp_group: output_type})
-        else:
-            raise NotImplementedError(
-                f"Unsupported Transformer Engine linear parallel mode {parallel_mode!r}"
-            )
-
-    def _linear_spmd_typecheck(output, *, weight, inp, non_tensor_args):
-        out, weight_workspace = output
-        options = _named_non_tensor_args(_te_linear._linear_forward_impl, non_tensor_args)
-        _assert_te_linear_types(out, inp, options)
-        if weight_workspace is not None:
-            spmd.assert_local_type_like(weight_workspace, weight)
-
-    _Linear.spmd_typecheck = staticmethod(_linear_spmd_typecheck)
-
 
 class TELinear(te.pytorch.Linear):
     """Wrapper for the Transformer-Engine's `Linear` layer.
@@ -964,20 +916,6 @@ class TELinear(te.pytorch.Linear):
 
 if HAVE_TE:
     from transformer_engine.pytorch.module.layernorm_linear import _LayerNormLinear
-
-    def _layernorm_linear_spmd_typecheck(output, *, inp, weight, non_tensor_args):
-        out, ln_out, weight_workspace = output
-        options = _named_non_tensor_args(_LayerNormLinear.forward, non_tensor_args)
-        _assert_te_linear_types(out, inp, options)
-        if ln_out is not None:
-            if options["return_layernorm_output_gathered"]:
-                spmd.assert_local_type_like(ln_out, inp, {options["tp_group"]: spmd.R})
-            else:
-                spmd.assert_local_type_like(ln_out, inp)
-        if weight_workspace is not None:
-            spmd.assert_local_type_like(weight_workspace, weight)
-
-    _LayerNormLinear.spmd_typecheck = staticmethod(_layernorm_linear_spmd_typecheck)
 
 
 class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
@@ -1423,8 +1361,6 @@ class TERowParallelLinear(TELinear):
 
 if HAVE_TE:
     from transformer_engine.pytorch.attention.dot_product_attention.backends import FusedAttnFunc
-
-    spmd.register_local_autograd_function(FusedAttnFunc)
 
 
 class TEDotProductAttention(te.pytorch.DotProductAttention):
@@ -3081,20 +3017,6 @@ try:
         else:
             return parallel_cross_entropy(logits, labels, 0.0, False, tp_group)
 
-    def _cross_entropy_spmd_typecheck(output, *, inp, target, dist_process_group):
-        if dist_process_group is None:
-            # No collective, so the ordinary local rule applies. A hook cannot yet
-            # delegate to that rule, so state it directly: the logits must vary
-            # exactly where the targets do, and so does the loss.
-            spmd.assert_local_type_like(inp, target)
-            spmd.assert_local_type_like(output, target)
-            return
-        spmd.assert_type(inp, {dist_process_group: spmd.S(-1)})
-        spmd.assert_type(target, {dist_process_group: spmd.I})
-        spmd.assert_local_type_like(output, target)
-
-    CrossEntropyFunction.spmd_typecheck = staticmethod(_cross_entropy_spmd_typecheck)
-
 except ImportError:
     te_parallel_cross_entropy = None  # type: ignore[assignment, misc]
 
@@ -3157,10 +3079,6 @@ if HAVE_TE and is_te_min_version("2.7.0.dev"):
         fused_moe_aux_loss,
         fused_topk_with_score_function,
     )
-
-    spmd.register_local_autograd_function(FusedAuxLoss)
-    spmd.register_local_autograd_function(FusedTopkScoreFunction)
-    spmd.register_local_autograd_function(FusedComputeScoresForMoEAuxLoss)
 
 else:
     fused_topk_with_score_function = None

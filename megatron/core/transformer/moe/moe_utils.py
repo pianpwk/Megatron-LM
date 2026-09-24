@@ -4,7 +4,6 @@ import math
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
-import spmd_types as spmd
 import torch
 
 from megatron.core import parallel_state
@@ -264,15 +263,6 @@ class MoEAuxLossAutoScaler(torch.autograd.Function):
         """
         ctx.save_for_backward(aux_loss)
         return output
-
-    @staticmethod
-    def spmd_typecheck(result, *, output):
-        """The forward is the identity on ``output``.
-
-        ``aux_loss`` only contributes a gradient in backward, so it must not
-        influence the result's type; the generic local rule would let it.
-        """
-        spmd.assert_type_like(result, output)
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -1314,7 +1304,6 @@ def apply_biased_logits(logits, std, layer_number=None):
     return RandomSTEShared.apply(logits, std, layer_number)
 
 
-@spmd.register_local_autograd_function
 class RouterGatingLinearFunction(torch.autograd.Function):
     """
     Autograd function for router gating linear.
