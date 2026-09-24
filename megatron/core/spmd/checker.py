@@ -3,26 +3,13 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Any, Iterator, Literal
+from typing import Iterator, Literal
 
 import spmd_types as spmd
 import torch
 from spmd_types.checker import typecheck as _typecheck
 
 from megatron.core.spmd.annotations import model_parallel_mesh
-
-
-def assert_ddp_parameters_replicated(ddp: Any) -> None:
-    """Record the gradient-reduction replication promise made by Megatron DDP."""
-    mesh = spmd.current_mesh()
-    dense_reduction_axis = spmd.MeshAxis.of(ddp.dp_cp_group)
-    for param in ddp.params_with_grad:
-        if getattr(param, "allreduce", True):
-            for axis in mesh:
-                if axis <= dense_reduction_axis:
-                    spmd.assert_type(param, {axis: spmd.R})
-        else:
-            spmd.assert_type(param, {ddp.expt_dp_group: spmd.R})
 
 
 @contextmanager
