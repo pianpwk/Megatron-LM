@@ -357,6 +357,7 @@ def _is_fake_process_group(group: torch.distributed.ProcessGroup) -> bool:
     return torch.distributed.get_backend(group) == "fake"
 
 
+@spmd.no_typecheck
 def _fake_dispatch(x, routing_map, probs, num_local_experts, num_permuted_tokens):
     """Shape-faithful stand-in for the HybridEP dispatch kernel on a fake process group.
 
@@ -413,10 +414,9 @@ class HybridEPDispatch(torch.autograd.Function):
         if ctx.fake:
             # The kernel needs real inter-rank transport. The stand-in carries no
             # types of its own; the sidecar rule states the contract for both.
-            with spmd.no_typecheck():
-                dispatched_hidden, dispatched_probs, tokens_per_expert, handle = _fake_dispatch(
-                    x, routing_map, probs, num_local_experts, num_permuted_tokens
-                )
+            dispatched_hidden, dispatched_probs, tokens_per_expert, handle = _fake_dispatch(
+                x, routing_map, probs, num_local_experts, num_permuted_tokens
+            )
             ctx.handle = handle
             ctx.probs_shape = probs.shape
             return dispatched_hidden, dispatched_probs, None, tokens_per_expert, handle
