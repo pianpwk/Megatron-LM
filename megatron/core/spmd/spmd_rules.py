@@ -9,7 +9,12 @@ import spmd_types as spmd
 from megatron.core import parallel_state
 from megatron.core import utils as megatron_utils
 from megatron.core.extensions.transformer_engine import HAVE_TE
-from megatron.core.fusions import fused_bias_gelu, fused_bias_swiglu, fused_cross_entropy
+from megatron.core.fusions import (
+    fused_bias_gelu,
+    fused_bias_swiglu,
+    fused_cross_entropy,
+    fused_mla_yarn_rope_apply,
+)
 from megatron.core.tensor_parallel import cross_entropy as tp_cross_entropy
 from megatron.core.tensor_parallel import layers as tp_layers
 from megatron.core.tensor_parallel import mappings as tp_mappings
@@ -34,6 +39,13 @@ def _reduce_from_model_parallel_region(output, *, input_, group):
     # as router token counts, is typed R so it can mix freely with V.
     output_type = spmd.I if output.requires_grad else spmd.R
     spmd.assert_local_type_like(output, input_, {group: output_type})
+
+
+@rule_for(tp_mappings._GatherFromModelParallelRegion)
+def _gather_from_model_parallel_region(output, *, input_, group):
+    """Type the last-dimension gather and split backward."""
+    spmd.assert_type(input_, {group: spmd.S(-1)})
+    spmd.assert_local_type_like(output, input_, {group: spmd.I})
 
 
 @rule_for(tp_mappings._ScatterToSequenceParallelRegion)
@@ -208,6 +220,8 @@ LOCAL_AUTOGRAD_FUNCTIONS = [
     megatron_utils.MakeViewlessTensor,
     fused_bias_gelu.GeLUFunction,
     fused_bias_swiglu.SwiGLUFunction,
+    fused_mla_yarn_rope_apply._FusedMLARoPEInplace,
+    fused_mla_yarn_rope_apply._FusedMLARoPEKVSplit,
     moe_utils.RouterGatingLinearFunction,
 ]
 
